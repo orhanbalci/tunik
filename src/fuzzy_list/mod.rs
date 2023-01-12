@@ -1,3 +1,7 @@
+use std::{borrow::Borrow, rc::Rc};
+
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use tui::{
     buffer::Buffer,
     layout::{Corner, Rect},
@@ -7,13 +11,16 @@ use tui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+// let matcher = SkimMatcherV2::default();
+
 #[derive(Debug, Clone, Default)]
-pub struct ListState {
+pub struct FuzzyListState {
     offset: usize,
     selected: Option<usize>,
+    filter: Option<String>,
 }
 
-impl ListState {
+impl FuzzyListState {
     pub fn selected(&self) -> Option<usize> {
         self.selected
     }
@@ -24,32 +31,54 @@ impl ListState {
             self.offset = 0;
         }
     }
+
+    pub fn get_filter(&self) -> Option<String> {
+        self.filter.clone()
+    }
+
+    pub fn set_filter(&mut self, filter: &str) {
+        self.filter = Some(filter.into());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListItem<'a> {
+pub struct FuzzyListItem<'a> {
     content: Text<'a>,
     style: Style,
 }
 
-impl<'a> ListItem<'a> {
-    pub fn new<T>(content: T) -> ListItem<'a>
+impl<'a> FuzzyListItem<'a> {
+    pub fn new<T>(content: T) -> FuzzyListItem<'a>
     where
         T: Into<Text<'a>>,
     {
-        ListItem {
+        FuzzyListItem {
             content: content.into(),
             style: Style::default(),
         }
     }
 
-    pub fn style(mut self, style: Style) -> ListItem<'a> {
+    pub fn style(mut self, style: Style) -> FuzzyListItem<'a> {
         self.style = style;
         self
     }
 
     pub fn height(&self) -> usize {
         self.content.height()
+    }
+
+    pub fn matches(&self, matcher: &Rc<dyn FuzzyMatcher>, filter: &str) -> bool {
+        self.content
+            .lines
+            .iter()
+            .map(|spans| {
+                spans
+                    .0
+                    .iter()
+                    .map(|span| matcher.fuzzy_match(span.content.as_ref(), filter).is_some())
+                    .any(|is_filtered| is_filtered)
+            })
+            .any(|is_span_filtered| is_span_filtered)
     }
 }
 
@@ -67,10 +96,10 @@ impl<'a> ListItem<'a> {
 ///     .highlight_style(Style::default().add_modifier(Modifier::ITALIC))
 ///     .highlight_symbol(">>");
 /// ```
-#[derive(Debug, Clone)]
-pub struct List<'a> {
+#[derive(Clone)]
+pub struct FuzzyList<'a> {
     block: Option<Block<'a>>,
-    items: Vec<ListItem<'a>>,
+    items: Vec<FuzzyListItem<'a>>,
     /// Style used as a base style for the widget
     style: Style,
     start_corner: Corner,
@@ -80,14 +109,20 @@ pub struct List<'a> {
     highlight_symbol: Option<&'a str>,
     /// Whether to repeat the highlight symbol for each line of the selected item
     repeat_highlight_symbol: bool,
+    /// latest filter text
+    latest_filter: Option<String>,
+    /// filtered items
+    filtered_items: Vec<FuzzyListItem<'a>>,
+    /// matcher algorithm
+    matcher: Rc<dyn FuzzyMatcher>,
 }
 
-impl<'a> List<'a> {
-    pub fn new<T>(items: T) -> List<'a>
+impl<'a> FuzzyList<'a> {
+    pub fn new<T>(items: T) -> FuzzyList<'a>
     where
-        T: Into<Vec<ListItem<'a>>>,
+        T: Into<Vec<FuzzyListItem<'a>>>,
     {
-        List {
+        FuzzyList {
             block: None,
             style: Style::default(),
             items: items.into(),
@@ -95,35 +130,38 @@ impl<'a> List<'a> {
             highlight_style: Style::default(),
             highlight_symbol: None,
             repeat_highlight_symbol: false,
+            latest_filter: None,
+            filtered_items: vec![],
+            matcher: Rc::new(SkimMatcherV2::default()),
         }
     }
 
-    pub fn block(mut self, block: Block<'a>) -> List<'a> {
+    pub fn block(mut self, block: Block<'a>) -> FuzzyList<'a> {
         self.block = Some(block);
         self
     }
 
-    pub fn style(mut self, style: Style) -> List<'a> {
+    pub fn style(mut self, style: Style) -> FuzzyList<'a> {
         self.style = style;
         self
     }
 
-    pub fn highlight_symbol(mut self, highlight_symbol: &'a str) -> List<'a> {
+    pub fn highlight_symbol(mut self, highlight_symbol: &'a str) -> FuzzyList<'a> {
         self.highlight_symbol = Some(highlight_symbol);
         self
     }
 
-    pub fn highlight_style(mut self, style: Style) -> List<'a> {
+    pub fn highlight_style(mut self, style: Style) -> FuzzyList<'a> {
         self.highlight_style = style;
         self
     }
 
-    pub fn repeat_highlight_symbol(mut self, repeat: bool) -> List<'a> {
+    pub fn repeat_highlight_symbol(mut self, repeat: bool) -> FuzzyList<'a> {
         self.repeat_highlight_symbol = repeat;
         self
     }
 
-    pub fn start_corner(mut self, corner: Corner) -> List<'a> {
+    pub fn start_corner(mut self, corner: Corner) -> FuzzyList<'a> {
         self.start_corner = corner;
         self
     }
@@ -134,43 +172,96 @@ impl<'a> List<'a> {
         offset: usize,
         max_height: usize,
     ) -> (usize, usize) {
-        let offset = offset.min(self.items.len().saturating_sub(1));
+        let is_filtered = self.latest_filter.is_some();
+        let offset = if !is_filtered {
+            offset.min(self.items.len().saturating_sub(1))
+        } else {
+            offset.min(self.filtered_items.len().saturating_sub(1))
+        };
         let mut start = offset;
         let mut end = offset;
         let mut height = 0;
-        for item in self.items.iter().skip(offset) {
-            if height + item.height() > max_height {
-                break;
+        if !is_filtered {
+            for item in self.items.iter().skip(offset) {
+                if height + item.height() > max_height {
+                    break;
+                }
+                height += item.height();
+                end += 1;
             }
-            height += item.height();
-            end += 1;
+        } else {
+            for item in self.filtered_items.iter().skip(offset) {
+                if height + item.height() > max_height {
+                    break;
+                }
+                height += item.height();
+                end += 1;
+            }
         }
 
-        let selected = selected.unwrap_or(0).min(self.items.len() - 1);
+        let selected = if !is_filtered {
+            selected.unwrap_or(0).min(self.items.len() - 1)
+        } else {
+            selected.unwrap_or(0).min(self.filtered_items.len() - 1)
+        };
         while selected >= end {
-            height = height.saturating_add(self.items[end].height());
+            height = height.saturating_add(if !is_filtered {
+                self.items[end].height()
+            } else {
+                self.filtered_items[end].height()
+            });
             end += 1;
             while height > max_height {
-                height = height.saturating_sub(self.items[start].height());
+                height = height.saturating_sub(if !is_filtered {
+                    self.items[start].height()
+                } else {
+                    self.filtered_items[start].height()
+                });
                 start += 1;
             }
         }
         while selected < start {
             start -= 1;
-            height = height.saturating_add(self.items[start].height());
+            height = height.saturating_add(if !is_filtered {
+                self.items[start].height()
+            } else {
+                self.filtered_items[start].height()
+            });
             while height > max_height {
                 end -= 1;
-                height = height.saturating_sub(self.items[end].height());
+                height = height.saturating_sub(if !is_filtered {
+                    self.items[end].height()
+                } else {
+                    self.filtered_items[end].height()
+                });
             }
         }
         (start, end)
     }
 }
 
-impl<'a> StatefulWidget for List<'a> {
-    type State = ListState;
+impl<'a> StatefulWidget for FuzzyList<'a> {
+    type State = FuzzyListState;
 
     fn render(mut self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+        if let Some(ref f) = state.get_filter() {
+            if let Some(ref lf) = self.latest_filter {
+                if *f != *lf {
+                    self.latest_filter = Some(f.clone());
+                }
+            } else {
+                self.latest_filter = Some(f.clone());
+            }
+            if self.latest_filter.is_some() {
+                self.filtered_items = self
+                    .items
+                    .iter()
+                    .cloned()
+                    .filter(|item| item.matches(&self.matcher, f))
+                    .collect();
+            }
+        }
+
         buf.set_style(area, self.style);
         let list_area = match self.block.take() {
             Some(b) => {
@@ -185,9 +276,16 @@ impl<'a> StatefulWidget for List<'a> {
             return;
         }
 
-        if self.items.is_empty() {
+        let is_filtered = self.latest_filter.is_some();
+
+        if self.items.is_empty() && !is_filtered {
             return;
         }
+
+        if self.filtered_items.is_empty() && is_filtered {
+            return;
+        }
+
         let list_height = list_area.height as usize;
 
         let (start, end) = self.get_items_bounds(state.selected, state.offset, list_height);
@@ -198,8 +296,12 @@ impl<'a> StatefulWidget for List<'a> {
 
         let mut current_height = 0;
         let has_selection = state.selected.is_some();
-        for (i, item) in self
-            .items
+        let mut rendering_items = if is_filtered {
+            self.filtered_items
+        } else {
+            self.items
+        };
+        for (i, item) in rendering_items
             .iter_mut()
             .enumerate()
             .skip(state.offset)
@@ -256,9 +358,9 @@ impl<'a> StatefulWidget for List<'a> {
     }
 }
 
-impl<'a> Widget for List<'a> {
+impl<'a> Widget for FuzzyList<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let mut state = ListState::default();
+        let mut state = FuzzyListState::default();
         StatefulWidget::render(self, area, buf, &mut state);
     }
 }
