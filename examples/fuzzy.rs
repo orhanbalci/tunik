@@ -1,4 +1,3 @@
-/// This example is taken from https://raw.githubusercontent.com/fdehau/tui-rs/master/examples/user_input.rs
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -88,7 +87,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                 InputMode::Editing => match key.code {
                     KeyCode::Enter => {
                         // set filter here
-                        app.list_state.set_filter(app.input.value());
+                        app.list_state.set_filter(Some(app.input.value()));
                         app.input.reset();
                     }
                     KeyCode::Esc => {
@@ -134,7 +133,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
                 Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" to stop editing, "),
                 Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" to record the message"),
+                Span::raw(" to filter list"),
             ],
             Style::default(),
         ),
@@ -177,7 +176,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
         .enumerate()
         .map(|(i, m)| {
             let content = vec![Spans::from(Span::raw(format!("{}: {}", i, m)))];
-            FuzzyListItem::new(content)
+            FuzzyListItem::new(content).filter_style(Style::default().fg(Color::Blue))
         })
         .collect();
     let cities_widget =

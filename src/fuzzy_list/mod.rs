@@ -1,17 +1,15 @@
-use std::{borrow::Borrow, rc::Rc};
+use std::{borrow::Borrow, rc::Rc, str::MatchIndices};
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use tui::{
     buffer::Buffer,
     layout::{Corner, Rect},
-    style::Style,
-    text::Text,
+    style::{Color, Style},
+    text::{Span, Spans, Text},
     widgets::{Block, StatefulWidget, Widget},
 };
 use unicode_width::UnicodeWidthStr;
-
-// let matcher = SkimMatcherV2::default();
 
 #[derive(Debug, Clone, Default)]
 pub struct FuzzyListState {
@@ -36,8 +34,10 @@ impl FuzzyListState {
         self.filter.clone()
     }
 
-    pub fn set_filter(&mut self, filter: &str) {
-        self.filter = Some(filter.into());
+    pub fn set_filter(&mut self, filter: Option<&str>) {
+        self.filter = filter
+            .map(|f| f.into())
+            .and_then(|f: String| if f.is_empty() { None } else { Some(f) });
     }
 }
 
@@ -45,6 +45,7 @@ impl FuzzyListState {
 pub struct FuzzyListItem<'a> {
     content: Text<'a>,
     style: Style,
+    filter_style: Style,
 }
 
 impl<'a> FuzzyListItem<'a> {
@@ -55,6 +56,7 @@ impl<'a> FuzzyListItem<'a> {
         FuzzyListItem {
             content: content.into(),
             style: Style::default(),
+            filter_style: Style::default().fg(Color::Red),
         }
     }
 
@@ -63,27 +65,70 @@ impl<'a> FuzzyListItem<'a> {
         self
     }
 
+    pub fn filter_style(mut self, filter_style: Style) -> FuzzyListItem<'a> {
+        self.filter_style = filter_style;
+        self
+    }
+
     pub fn height(&self) -> usize {
         self.content.height()
     }
 
-    pub fn matches(&self, matcher: &Rc<dyn FuzzyMatcher>, filter: &str) -> bool {
-        self.content
-            .lines
-            .iter()
-            .map(|spans| {
-                spans
-                    .0
-                    .iter()
-                    .map(|span| matcher.fuzzy_match(span.content.as_ref(), filter).is_some())
-                    .any(|is_filtered| is_filtered)
-            })
-            .any(|is_span_filtered| is_span_filtered)
+    pub fn matches(&mut self, matcher: &Rc<dyn FuzzyMatcher>, filter: &str) -> bool {
+        let mut matches = false;
+        self.content.lines.iter_mut().for_each(|spans| {
+            let spans_cloned = spans.clone();
+            let filtered_spans: Vec<Span> = spans_cloned
+                .0
+                .iter()
+                .flat_map(|span| {
+                    let content = span.content.as_ref();
+                    let match_indices = matcher.fuzzy_indices(content, filter);
+                    if let Some(indices) = match_indices {
+                        matches = true;
+                        // dbg!(&indices);
+                        let index = *indices.1.first().unwrap();
+
+                        // consider only first match. split text into three or two partes
+                        if index > 0 && index < content.len() - filter.len() {
+                            vec![
+                                Span::raw(String::from(&content[0..index])),
+                                Span::styled(
+                                    String::from(&content[index..index + filter.len()]),
+                                    self.filter_style,
+                                ),
+                                Span::raw(String::from(&content[index + filter.len()..])),
+                            ]
+                        } else if index == 0 {
+                            vec![
+                                Span::styled(
+                                    String::from(&content[0..filter.len()]),
+                                    self.filter_style,
+                                ),
+                                Span::raw(String::from(&content[filter.len()..])),
+                            ]
+                        } else {
+                            vec![
+                                Span::raw(String::from(&content[0..content.len() - filter.len()])),
+                                Span::styled(
+                                    String::from(&content[content.len() - filter.len()..]),
+                                    self.filter_style,
+                                ),
+                            ]
+                        }
+                    } else {
+                        vec![Span::raw(String::from(content))]
+                    }
+                })
+                .collect();
+            *spans = Spans::from(filtered_spans);
+        });
+        matches
     }
 }
 
 /// A widget to display several items among which one can be selected (optional)
-///
+/// Supports fuzzy filtering of content
 /// # Examples
 ///
 /// ```
@@ -252,12 +297,19 @@ impl<'a> StatefulWidget for FuzzyList<'a> {
             } else {
                 self.latest_filter = Some(f.clone());
             }
+
             if self.latest_filter.is_some() {
                 self.filtered_items = self
                     .items
-                    .iter()
-                    .cloned()
-                    .filter(|item| item.matches(&self.matcher, f))
+                    .clone()
+                    .iter_mut()
+                    .filter_map(|item| {
+                        if item.matches(&self.matcher, f) {
+                            Some(item.clone())
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
             }
         }
@@ -345,11 +397,11 @@ impl<'a> StatefulWidget for FuzzyList<'a> {
                         list_area.width as usize,
                         item_style,
                     );
-                    (elem_x, (list_area.width - (elem_x - x)) as u16)
+                    (elem_x, (list_area.width - (elem_x - x)))
                 } else {
                     (x, list_area.width)
                 };
-                buf.set_spans(elem_x, y + j as u16, line, max_element_width as u16);
+                buf.set_spans(elem_x, y + j as u16, line, max_element_width);
             }
             if is_selected {
                 buf.set_style(area, self.highlight_style);
