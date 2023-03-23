@@ -4,12 +4,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use serde_json::Value;
-use std::{
-    error::Error,
-    fs::{self, File},
-    io,
-    path::Path,
-};
+use std::{error::Error, fs, io};
 use tui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
