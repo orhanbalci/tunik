@@ -3,13 +3,19 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::{error::Error, io};
+use serde_json::Value;
+use std::{
+    error::Error,
+    fs::{self, File},
+    io,
+    path::Path,
+};
 use tui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Span, Spans, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
 };
 use tui_input::backend::crossterm::EventHandler;
@@ -22,22 +28,52 @@ enum InputMode {
 }
 
 /// App holds the state of the application
-struct App {
+struct App<'a> {
     /// Current value of the input box
     input: Input,
     /// Current input mode
     input_mode: InputMode,
     /// State of fuzzy list
-    list_state: FuzzyListState,
+    list_state: FuzzyListState<'a>,
 }
 
-impl Default for App {
-    fn default() -> App {
+impl<'a> Default for App<'a> {
+    fn default() -> App<'a> {
+        let country_data = App::get_country_data();
+        let countries = country_data
+            .into_iter()
+            .flat_map(|(country, cities)| {
+                let mut items = vec![];
+                let style = Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::ITALIC);
+                for city in cities.as_array().unwrap().iter() {
+                    let content = vec![
+                        Span::styled(city.as_str().unwrap().to_string(), style),
+                        Span::raw(" - "),
+                        Span::from(country.clone()),
+                    ];
+                    items.push(
+                        FuzzyListItem::new(Spans::from(content))
+                            .filter_style(Style::default().fg(Color::Blue)),
+                    );
+                }
+                items
+            })
+            .collect();
         App {
             input: Input::default(),
             input_mode: InputMode::Normal,
-            list_state: FuzzyListState::default(),
+            list_state: FuzzyListState::with_items(countries),
         }
+    }
+}
+
+impl<'a> App<'a> {
+    pub fn get_country_data() -> serde_json::Map<String, Value> {
+        let country_data = fs::read_to_string("./assets/countries.json").unwrap();
+        let json_country_data: Value = serde_json::from_str(&country_data).unwrap();
+        json_country_data.as_object().unwrap().clone()
     }
 }
 
@@ -76,11 +112,17 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
         if let Event::Key(key) = event::read()? {
             match app.input_mode {
                 InputMode::Normal => match key.code {
-                    KeyCode::Char('e') => {
+                    KeyCode::F(4) => {
                         app.input_mode = InputMode::Editing;
                     }
                     KeyCode::Char('q') => {
                         return Ok(());
+                    }
+                    KeyCode::Up => {
+                        app.list_state.decrement_selected();
+                    }
+                    KeyCode::Down => {
+                        app.list_state.increment_selected();
                     }
                     _ => {}
                 },
@@ -92,6 +134,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                     }
                     KeyCode::Esc => {
                         app.input_mode = InputMode::Normal;
+                    }
+                    KeyCode::Up => {
+                        app.list_state.decrement_selected();
+                    }
+                    KeyCode::Down => {
+                        app.list_state.increment_selected();
                     }
                     _ => {
                         app.input.handle_event(&Event::Key(key));
@@ -122,8 +170,8 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
                 Span::raw("Press "),
                 Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" to exit, "),
-                Span::styled("e", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" to start editing."),
+                Span::styled("F4", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" to start filtering."),
             ],
             Style::default().add_modifier(Modifier::RAPID_BLINK),
         ),
@@ -131,7 +179,7 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
             vec![
                 Span::raw("Press "),
                 Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" to stop editing, "),
+                Span::raw(" to stop filtering, "),
                 Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" to filter list"),
             ],
@@ -170,16 +218,8 @@ fn ui<B: Backend>(f: &mut Frame<B>, app: &mut App) {
         }
     }
 
-    let cities = vec!["ankara", "istanbul", "eskisehir", "trabzon"];
-    let messages: Vec<FuzzyListItem> = cities
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let content = vec![Spans::from(Span::raw(format!("{}: {}", i, m)))];
-            FuzzyListItem::new(content).filter_style(Style::default().fg(Color::Blue))
-        })
-        .collect();
-    let cities_widget =
-        FuzzyList::new(messages).block(Block::default().borders(Borders::ALL).title("Cities"));
+    let cities_widget = FuzzyList::new(app.list_state.get_items())
+        .block(Block::default().borders(Borders::ALL).title("Cities"))
+        .highlight_style(Style::default().bg(Color::Red));
     f.render_stateful_widget(cities_widget, chunks[2], &mut app.list_state);
 }
