@@ -3,7 +3,7 @@ layout {
         plugin location="zellij:tab-bar"
     }
     pane split_direction="vertical" {
-        pane edit="roughr/src/lib.rs" size="65%"
+        pane edit="./src/lib.rs" size="65%"
         pane split_direction="horizontal"{
             pane command="cargo" {
                 args "test"
