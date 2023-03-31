@@ -7,7 +7,7 @@ description="ratatui components"
 homepage="https://github.com/orhanbalci"
 repository="https://github.com/orhanbalci/tunik.git"
 keywords=["tui","component","terminal"]
-categories=[]
+categories=["command-line-interface"]
 license="MIT"
 readme="README.md"
 
